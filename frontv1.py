@@ -3,6 +3,176 @@ import pandas as pd
 import numpy as np
 import os
 from datetime import datetime
+import requests
+import time
+import geonamescache
+# FUNCIONES AUXILIARES
+def _contar_pois_en_ciudad(ciudad, tags_query):
+    """Función auxiliar para ejecutar una consulta a la API Overpass."""
+    OVERPASS_URL = "http://overpass-api.de/api/interpreter"
+    query = f"""
+    [out:json][timeout:25];
+    area[name="{ciudad}"]->.searchArea;
+    (
+      {tags_query}
+    );
+    out count;
+    """
+    try:
+        response = requests.get(OVERPASS_URL, params={'data': query})
+        response.raise_for_status()
+        data = response.json()
+        return int(data['elements'][0]['tags']['total'])
+    except (requests.RequestException, KeyError, IndexError, ValueError):
+        return 0
+
+@st.cache_data
+def enriquecer_con_datos_osm_mejorado(df, columna_pais='Country/Region', max_ciudades_por_pais=3):
+    """
+    Enriquece el DataFrame buscando dinámicamente las ciudades principales
+    y contando puntos de interés, incluyendo hoteles.
+    """
+    print("Iniciando enriquecimiento con OSM (puede tardar varios minutos)...")
+    
+    gc = geonamescache.GeonamesCache()
+    paises_gc = gc.get_countries()
+    ciudades_gc = gc.get_cities()
+    country_name_to_iso2 = {data['name']: code for code, data in paises_gc.items()}
+
+    intereses = {
+        'Cultura': 'node["tourism"="museum"](area.searchArea); way["tourism"="museum"](area.searchArea);',
+        'Historia': 'node["historic"](area.searchArea); way["historic"](area.searchArea);',
+        'Naturaleza': 'node["leisure"="park"](area.searchArea); way["leisure"="nature_reserve"](area.searchArea);',
+        # TAREA 1.1 
+        'Hoteles': 'node["tourism"="hotel"](area.searchArea); way["tourism"="hotel"](area.searchArea);'
+    }
+
+    resultados_ciudades = []
+    paises_en_df = df[columna_pais].unique()
+    
+    for nombre_pais in paises_en_df:
+        codigo_iso2 = country_name_to_iso2.get(nombre_pais)
+        if not codigo_iso2: continue
+
+        ciudades_del_pais = [ciudades_gc[key] for key in ciudades_gc if ciudades_gc[key]['countrycode'] == codigo_iso2]
+        ciudades_del_pais.sort(key=lambda x: x['population'], reverse=True)
+        ciudades_a_procesar = ciudades_del_pais[:max_ciudades_por_pais]
+
+        if not ciudades_a_procesar: continue
+        print(f"\nProcesando País: {nombre_pais}")
+
+        for ciudad_data in ciudades_a_procesar:
+            nombre_ciudad = ciudad_data['name']
+            print(f"  -> Ciudad: {nombre_ciudad}...")
+            
+            fila = {'ciudad': nombre_ciudad, 'pais': nombre_pais}
+            for nombre_interes, tags_query in intereses.items():
+                conteo = _contar_pois_en_ciudad(nombre_ciudad, tags_query)
+                # El nombre de la columna será, por ejemplo, 'osm_hoteles'
+                fila[f"osm_{nombre_interes.lower()}"] = conteo
+                time.sleep(1)
+            
+            resultados_ciudades.append(fila)
+
+    if not resultados_ciudades:
+        print("Advertencia: No se obtuvieron datos de ciudades desde OSM.")
+        return df
+
+    df_ciudades = pd.DataFrame(resultados_ciudades)
+    
+    # Agregamos los datos de intereses a nivel de país (sumando los de sus ciudades)
+    columnas_intereses = ['osm_cultura', 'osm_historia', 'osm_naturaleza']
+    df_agregado = df_ciudades.groupby('pais')[columnas_intereses].sum().reset_index()
+    
+    df_enriquecido = df.merge(df_agregado, left_on=columna_pais, right_on='pais', how='left')
+    df_enriquecido[columnas_intereses] = df_enriquecido[columnas_intereses].fillna(0).astype(int)
+
+    # Unimos los datos de hoteles a nivel de ciudad
+    df_final = df_enriquecido.merge(df_ciudades[['pais', 'ciudad', 'osm_hoteles']], left_on=columna_pais, right_on='pais', how='left')
+    
+    print("¡Enriquecimiento con OSM completado!")
+    return df_final.drop(columns=['pais_x', 'pais_y']).rename(columns={'ciudad': 'City'})
+
+def clasificar_ambiente_por_hoteles(df, columna_pais='Country/Region'):
+    """
+    Clasifica el "ambiente" de una ciudad basado en la densidad de hoteles
+    en comparación con otras ciudades del mismo país.
+    """
+    print("Clasificando ambiente de ciudades por densidad de hoteles...")
+
+    # Usamos transform para calcular los cuantiles para cada grupo de país
+    q_low = df.groupby(columna_pais)['osm_hoteles'].transform(lambda x: x.quantile(0.33))
+    q_high = df.groupby(columna_pais)['osm_hoteles'].transform(lambda x: x.quantile(0.66))
+
+    # Creamos la nueva columna 'clasificacion_ambiente'
+    conditions = [
+        (df['osm_hoteles'] <= q_low) & (df['osm_hoteles'] < q_high), # Menos hoteles (y no es el único valor)
+        (df['osm_hoteles'] >= q_high) & (df['osm_hoteles'] > q_low)  # Más hoteles (y no es el único valor)
+    ]
+    choices = ['Refugio Tranquilo', 'Centro Vibrante']
+    
+    df['clasificacion_ambiente'] = pd.Series(
+        pd.NA, index=df.index
+    ).mask(conditions[0], choices[0]).mask(conditions[1], choices[1]).fillna('Equilibrado')
+
+    print("Clasificación de ambiente completada.")
+    return df
+
+
+@st.cache_data
+def obtener_ciudades_con_hoteles_osm(pais):
+    """
+    Obtiene una lista de ciudades y su cantidad de hoteles para un país específico
+    utilizando la API Overpass de OpenStreetMap.
+    """
+    st.info(f"Buscando ciudades con hoteles en {pais} vía OSM... Esto puede tardar un momento.")
+    
+    gc = geonamescache.GeonamesCache()
+    paises_gc = gc.get_countries()
+    ciudades_gc = gc.get_cities()
+    country_name_to_iso2 = {data['name']: code for code, data in paises_gc.items()}
+
+    codigo_iso2 = country_name_to_iso2.get(pais)
+    if not codigo_iso2:
+        st.warning(f"No se encontró el código ISO para '{pais}'. No se pueden buscar ciudades.")
+        return pd.DataFrame({'ciudad': [], 'hoteles': []})
+
+    ciudades_del_pais = [ciudades_gc[key] for key in ciudades_gc if ciudades_gc[key]['countrycode'] == codigo_iso2]
+    ciudades_del_pais.sort(key=lambda x: x['population'], reverse=True)
+    
+    # Limitar a las 20 ciudades más pobladas para no sobrecargar la API
+    ciudades_a_procesar = ciudades_del_pais[:20]
+
+    if not ciudades_a_procesar:
+        st.warning(f"No se encontraron ciudades para '{pais}' en la base de datos local.")
+        return pd.DataFrame({'ciudad': [], 'hoteles': []})
+
+    resultados = []
+    progress_bar = st.progress(0, text="Consultando ciudades en OSM...")
+
+    for i, ciudad_data in enumerate(ciudades_a_procesar):
+        nombre_ciudad = ciudad_data['name']
+        query_hoteles = f'node["tourism"="hotel"](area.searchArea); way["tourism"="hotel"](area.searchArea);'
+        
+        # Reutilizamos la función auxiliar existente
+        num_hoteles = _contar_pois_en_ciudad(nombre_ciudad, query_hoteles)
+        
+        if num_hoteles > 0:
+            resultados.append({'ciudad': nombre_ciudad, 'hoteles': num_hoteles})
+        
+        # Actualizar barra de progreso
+        progress_text = f"Consultando ciudades en OSM... ({i+1}/{len(ciudades_a_procesar)})"
+        progress_bar.progress((i + 1) / len(ciudades_a_procesar), text=progress_text)
+        time.sleep(1) # Pausa para no sobrecargar la API
+
+    progress_bar.empty()
+
+    if not resultados:
+        st.warning(f"No se encontraron hoteles en las principales ciudades de {pais} a través de OSM.")
+        return pd.DataFrame({'ciudad': [], 'hoteles': []})
+
+    return pd.DataFrame(resultados)
+
 
 # --- Configuración de la Página ---
 st.set_page_config(
@@ -146,11 +316,24 @@ def load_data():
     
     return df_latest
 
+@st.cache_data
+def get_processed_data():
+    """
+    Función única para cargar, enriquecer y procesar todos los datos.
+    El resultado se cachea para evitar recálculos en cada interacción.
+    La primera ejecución puede tardar varios minutos.
+    """
+    with st.spinner("Cargando y procesando datos por primera vez. Esto puede tardar varios minutos..."):
+        df_destinos = load_data()
+        #INICIO: ENRIQUECIMIENTO CON DATOS OSM Y CLASIFICACIÓN
+        df_enriquecido = enriquecer_con_datos_osm_mejorado(df_destinos, columna_pais='country', max_ciudades_por_pais=3)
+        df_clasificado = clasificar_ambiente_por_hoteles(df_enriquecido, columna_pais='country')
+        #FIN: ENRIQUECIMIENTO
+    return df_clasificado
 
-df_destinos = load_data()
-
+df_clasificado = get_processed_data()
 # Manejar el caso donde no hay datos válidos
-if df_destinos.empty:
+if df_clasificado.empty:
     st.error("❌ No hay datos válidos disponibles. Verifica que el archivo CSV esté correcto.")
     st.stop()
 
@@ -159,9 +342,9 @@ st.sidebar.header("✈️ Tu Perfil de Viajero")
 st.sidebar.write("Define tus preferencias.")
 
 # Calcular rangos dinámicos basados en datos reales
-min_budget = float(df_destinos['costo_por_turista'].quantile(0.05))
-max_budget = float(df_destinos['costo_por_turista'].quantile(0.95))
-median_budget = float(df_destinos['costo_por_turista'].median())
+min_budget = float(df_clasificado['costo_por_turista'].quantile(0.05))
+max_budget = float(df_clasificado['costo_por_turista'].quantile(0.95))
+median_budget = float(df_clasificado['costo_por_turista'].median())
 
 # 1. Input de Presupuesto por persona
 presupuesto = st.sidebar.slider(
@@ -189,7 +372,7 @@ salud_economica = st.sidebar.selectbox(
 )
 
 # 4. Filtro por región (opcional)
-regiones_disponibles = ['Todas'] + sorted(df_destinos['country'].unique().tolist())[:50]  # Top 50
+regiones_disponibles = ['Todas'] + sorted(df_clasificado['country'].unique().tolist())[:50]  # Top 50
 region = st.sidebar.selectbox(
     'Filtrar por región/país (opcional):',
     options=regiones_disponibles
@@ -207,7 +390,7 @@ st.sidebar.subheader("✅ Destinos Ideales")
 st.sidebar.caption("Países que visitaste y te *encantaron*")
 paises_ideales_input = st.sidebar.multiselect(
     "Selecciona destinos que visitaste y amaste:",
-    sorted(df_destinos['country'].unique().tolist()),
+    sorted(df_clasificado['country'].unique().tolist()),
     default=st.session_state.paises_ideales,
     key='paises_ideales_selector',
     help="Estos países sirven como referencia para encontrar similares"
@@ -219,7 +402,7 @@ st.sidebar.subheader("❌ Destinos No-Ideales")
 st.sidebar.caption("Países que visitaste pero no recomendarías")
 paises_no_ideales_input = st.sidebar.multiselect(
     "Selecciona destinos que NO te gustaron:",
-    sorted(df_destinos['country'].unique().tolist()),
+    sorted(df_clasificado['country'].unique().tolist()),
     default=st.session_state.paises_no_ideales,
     key='paises_no_ideales_selector',
     help="Ayuda al sistema a evitar destinos similares a estos"
@@ -232,7 +415,7 @@ if st.sidebar.button('🎯 Generar Perfil Personalizado', use_container_width=Tr
         from perfil_usuario import extraer_perfil_usuario
         
         st.session_state.perfil_datos = extraer_perfil_usuario(
-            df_destinos,
+            df_clasificado,
             st.session_state.paises_ideales,
             st.session_state.paises_no_ideales
         )
@@ -349,7 +532,7 @@ with col2:
 with col3:
     st.metric("Salud Económica", salud_economica.split('(')[0].strip())
 with col4:
-    st.metric("Destinos Disponibles", len(df_destinos))
+    st.metric("Destinos Disponibles", len(df_clasificado))
 
 st.divider()
 
@@ -366,7 +549,7 @@ if generar_btn or ('mostrar_recomendaciones' in st.session_state and st.session_
     with st.spinner('Analizando datos y aplicando tu perfil... 📊'):
         # Llamar a la función lógica unificada, pasando todos los parámetros necesarios
         recomendaciones = generar_recomendaciones(
-            df=df_destinos,
+            df=df_clasificado,
             presupuesto=presupuesto,
             interes_turistico=interes_turistico,
             salud_economica=salud_economica,
@@ -382,7 +565,7 @@ if generar_btn or ('mostrar_recomendaciones' in st.session_state and st.session_
             st.success("✅ ¡Hemos encontrado estos destinos para ti!")
             
             # Tabs para diferentes vistas
-            tab1, tab2, tab3 = st.tabs(["📍 Recomendaciones", "📊 Comparativa", "👤 Mi Perfil"])
+            tab1, tab2, tab3, tab4, tab5 = st.tabs(["📍 Recomendaciones", "📊 Comparativa", "👤 Mi Perfil", "📈 Tendencias", "🏛️ Ciudades del Destino"])
             
             with tab1:
                 # Mostrar resultados
