@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 from datetime import datetime
+<<<<<<< Updated upstream
 
 # --- Configuración de la Página ---
 st.set_page_config(
@@ -30,128 +31,104 @@ if 'perfil_datos' not in st.session_state:
 @st.cache_data
 def load_data():
     """Carga datos históricos reales del CSV world_tourism_economy_data.csv"""
+=======
+import requests
+import time
+import geonamescache
+# --- Funciones de Carga de Datos ---
+
+@st.cache_data
+def load_precomputed_osm_data():
+    """Carga los datos de OSM precalculados desde el archivo CSV."""
+>>>>>>> Stashed changes
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    csv_path = os.path.join(script_dir, "world_tourism_economy_data.csv")
-    
+    csv_path = os.path.join(script_dir, "osm_cities_with_hotels.csv")
     try:
         df = pd.read_csv(csv_path)
+        # Asegurarse de que los nombres de columna no tengan espacios extra
+        df.columns = df.columns.str.strip()
+        return df
+    except FileNotFoundError:
+        st.error(f"Error: No se encontró el archivo 'osm_cities_with_hotels.csv'.")
+        st.warning("Por favor, ejecute el script 'precompute_osm_data.py' para generar este archivo.")
+        return None
     except Exception as e:
-        st.error(f"Error al leer el CSV: {e}")
-        return pd.DataFrame()
-    
-    # Filtrar solo datos de países individuales (excluir agregaciones)
-    # Lista exacta de agregaciones del Banco Mundial (entidades no-país)
-    aggregations_exact = [
-        'World',
-        'Euro area',
-        'European Union',
-        'High income',
-        'Low income',
-        'Middle income',
-        'Lower middle income',
-        'Upper middle income',
-        'Low & middle income',
-        'OECD members',
-        'East Asia & Pacific',
-        'East Asia & Pacific (excluding high income)',
-        'East Asia & Pacific (IDA & IBRD countries)',
-        'Europe & Central Asia',
-        'Europe & Central Asia (excluding high income)',
-        'Europe & Central Asia (IDA & IBRD countries)',
-        'Latin America & Caribbean',
-        'Latin America & Caribbean (excluding high income)',
-        'Latin America & the Caribbean (IDA & IBRD countries)',
-        'Middle East & North Africa',
-        'Middle East & North Africa (excluding high income)',
-        'Middle East & North Africa (IDA & IBRD countries)',
-        'South Asia',
-        'South Asia (IDA & IBRD)',
-        'Sub-Saharan Africa',
-        'Sub-Saharan Africa (excluding high income)',
-        'Sub-Saharan Africa (IDA & IBRD countries)',
-        'Small states',
-        'Caribbean small states',
-        'Pacific island small states',
-        'Other small states',
-        'Fragile and conflict affected situations',
-        'Heavily indebted poor countries (HIPC)',
-        'IDA & IBRD total',
-        'IDA blend',
-        'IDA only',
-        'IBRD only',
-        'IDA total',
-        'Least developed countries: UN classification',
-        'Arab World',
-        'Central Europe and the Baltics',
-        'Africa Eastern and Southern',
-        'Africa Western and Central',
-        'Early-demographic dividend',
-        'Late-demographic dividend',
-        'Pre-demographic dividend',
-        'Post-demographic dividend',
-        'North America',
-    ]
-    
-    # Crear máscara: excluir filas donde country coincida exactamente con agregaciones
-    mask = ~df['country'].isin(aggregations_exact)
-    df = df[mask].copy()
-    
-    # Usar datos más recientes por país (buscar último año con datos de turismo)
-    df_latest = df.copy()
-    
-    # Para cada país, encontrar el último registro que tenga tourism_receipts O tourism_arrivals
-    df_latest = df_latest[
-        (df_latest['tourism_receipts'].notna()) | (df_latest['tourism_arrivals'].notna())
-    ].sort_values(['country', 'year']).groupby('country').tail(1).copy()
-    
-    if df_latest.empty:
-        # Si no hay datos de turismo, usar el más reciente de todas formas
-        df_latest = df.sort_values('year').groupby('country').tail(1).copy()
-    
-    # Calcular costo promedio por turista (solo si ambos están disponibles)
-    df_latest['costo_por_turista'] = np.where(
-        (df_latest['tourism_receipts'].notna()) & (df_latest['tourism_arrivals'].notna()),
-        df_latest['tourism_receipts'] / df_latest['tourism_arrivals'],
-        np.nan
-    )
-    
-    # Calcular tendencia
-    df_trend = df.sort_values('year').groupby('country').agg({
-        'tourism_arrivals': 'last',
-        'year': 'last'
-    }).reset_index()
-    
-    df_trend_prev = df[df['year'] < df['year'].max()].sort_values('year').groupby('country').agg({
-        'tourism_arrivals': 'last'
-    }).reset_index()
-    df_trend_prev.columns = ['country', 'tourism_arrivals_prev']
-    
-    df_trend = df_trend.merge(df_trend_prev, on='country', how='left')
-    df_trend['crecimiento_anual'] = ((df_trend['tourism_arrivals'] - df_trend['tourism_arrivals_prev']) 
-                                      / df_trend['tourism_arrivals_prev'] * 100).fillna(0)
-    
-    df_latest = df_latest.merge(df_trend[['country', 'crecimiento_anual']], on='country', how='left')
-    
-    # Mantener registros que tengan al menos tourism_arrivals o tourism_receipts
-    df_latest = df_latest[(df_latest['tourism_receipts'].notna()) | (df_latest['tourism_arrivals'].notna())].copy()
-    
-    # Llenar valores faltantes con promedios razonables
-    df_latest['costo_por_turista'] = df_latest['costo_por_turista'].fillna(df_latest['costo_por_turista'].median())
-    df_latest['tourism_arrivals'] = df_latest['tourism_arrivals'].fillna(0)
-    df_latest['tourism_receipts'] = df_latest['tourism_receipts'].fillna(0)
-    
-    # Guardar datos históricos completos para visualización de tendencias (últimos 10 años)
-    df_trend_completo = df[df['year'] >= df['year'].max() - 10].sort_values(['country', 'year'])
-    st.session_state.df_trend_historico = df_trend_completo
-    
-    return df_latest
+        st.error(f"Error al leer el CSV de OSM: {e}")
+        return None
 
+@st.cache_data
+def load_country_data():
+    """Carga y preprocesa los datos económicos y turísticos a nivel de país."""
+    try:
+        # Carga de datos base
+        df = pd.read_csv("world_tourism_economy_data.csv")
+        df.columns = df.columns.str.strip()
+
+        # Limpieza y manejo de nulos
+        df.replace('..', np.nan, inplace=True)
+        numeric_cols = [
+            'tourism_receipts', 'tourism_arrivals', 'tourism_departures',
+            'gdp', 'inflation', 'unemployment'
+        ]
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+        # Llenar nulos de forma básica (se puede mejorar)
+        df['inflation'].fillna(df['inflation'].median(), inplace=True)
+        df['unemployment'].fillna(df['unemployment'].median(), inplace=True)
+
+        # Feature Engineering: Crear métricas clave
+        df_processed = df.sort_values(by=['country', 'year']).copy()
+        df_processed['prev_year_arrivals'] = df_processed.groupby('country')['tourism_arrivals'].shift(1)
+        df_processed['crecimiento_anual'] = (
+            (df_processed['tourism_arrivals'] - df_processed['prev_year_arrivals']) /
+            df_processed['prev_year_arrivals'] * 100
+        ).fillna(0)
+
+        df_processed['costo_por_turista'] = (
+            df_processed['tourism_receipts'] / df_processed['tourism_arrivals']
+        ).replace([np.inf, -np.inf], 0).fillna(0)
+
+        # Seleccionar los datos más recientes por país
+        df_final = df_processed.loc[df_processed.groupby('country')['year'].idxmax()]
+        
+        # Eliminar países sin datos cruciales
+        df_final.dropna(subset=['tourism_arrivals', 'costo_por_turista'], inplace=True)
+        
+        return df_final
+
+    except FileNotFoundError:
+        st.error("Error: No se encontró el archivo 'world_tourism_economy_data.csv'.")
+        return pd.DataFrame()
+    except Exception as e:
+        st.error(f"Error al procesar los datos de países: {e}")
+        return pd.DataFrame()
+
+<<<<<<< Updated upstream
 
 df_destinos = load_data()
 
 # Manejar el caso donde no hay datos válidos
 if df_destinos.empty:
     st.error("❌ No hay datos válidos disponibles. Verifica que el archivo CSV esté correcto.")
+=======
+@st.cache_data
+def get_processed_data():
+    """
+    Función principal para cargar los datos de países.
+    """
+    with st.spinner("Cargando datos de países..."):
+        df_destinos = load_country_data()
+    return df_destinos
+
+# Carga los dos dataframes por separado
+df_clasificado = get_processed_data()
+df_osm_ciudades = load_precomputed_osm_data()
+
+# Manejar el caso donde no hay datos válidos
+if df_clasificado.empty or df_osm_ciudades is None:
+    st.error("❌ No se pudieron cargar los datos necesarios. Verifica los archivos CSV.")
+>>>>>>> Stashed changes
     st.stop()
 
 # --- Barra Lateral (Inputs del Usuario) ---
@@ -629,6 +606,51 @@ if generar_btn or ('mostrar_recomendaciones' in st.session_state and st.session_
                 
                 else:
                     st.info("👈 Primero, selecciona destinos ideales en la barra lateral y haz clic en '🎯 Generar Perfil Personalizado'")
+            
+            with tab5:
+                st.subheader("🏛️ Ciudades Populares en tus Destinos Recomendados")
+                st.write("Explora las ciudades con más hoteles (según OpenStreetMap) dentro de los países que te recomendamos.")
+
+                # Extraer la lista única de países recomendados
+                paises_recomendados = recomendaciones['country'].unique()
+
+                if len(paises_recomendados) > 0:
+                    # Selector para que el usuario elija un país de la lista de recomendados
+                    pais_seleccionado_ciudades = st.selectbox(
+                        "Selecciona un país para explorar sus ciudades:",
+                        options=paises_recomendados,
+                        key="selector_ciudades_pais"
+                    )
+
+                    if pais_seleccionado_ciudades and df_osm_ciudades is not None:
+                        # CORRECTO: Filtrar el dataframe de OSM (df_osm_ciudades)
+                        ciudades_del_pais = df_osm_ciudades[df_osm_ciudades['Pais'] == pais_seleccionado_ciudades].copy()
+
+                        if not ciudades_del_pais.empty:
+                            # Opciones de ordenamiento
+                            orden_ciudades = st.radio(
+                                "Ordenar ciudades por:",
+                                ["Mayor número de hoteles", "Menor número de hoteles"],
+                                key="orden_hoteles",
+                                horizontal=True
+                            )
+
+                            # Ordenar el dataframe de ciudades
+                            ascending_order = (orden_ciudades == "Menor número de hoteles")
+                            ciudades_ordenadas = ciudades_del_pais.sort_values(by='Hoteles', ascending=ascending_order)
+
+                            st.write(f"Mostrando ciudades en **{pais_seleccionado_ciudades}**:")
+
+                            # Mostrar las ciudades en un formato de tabla mejorado
+                            st.dataframe(
+                                ciudades_ordenadas[['Ciudad', 'Hoteles']].rename(columns={'Hoteles': 'Número de Hoteles'}),
+                                use_container_width=True,
+                                hide_index=True
+                            )
+                        else:
+                            st.info(f"No se encontraron datos de ciudades para '{pais_seleccionado_ciudades}' en el archivo precalculado.")
+                else:
+                    st.warning("Primero genera una recomendación para poder explorar las ciudades.")
             
             # TAB 4 DESHABILITADA POR AHORA - PRÓXIMA ITERACIÓN
             # with tab4:
