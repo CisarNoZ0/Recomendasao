@@ -3,7 +3,9 @@ import pandas as pd
 import numpy as np
 import os
 from datetime import datetime
-<<<<<<< Updated upstream
+import requests
+import time
+import geonamescache
 
 # --- Configuración de la Página ---
 st.set_page_config(
@@ -12,10 +14,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# Inicializar session state para almacenar datos históricos
-if 'df_trend_historico' not in st.session_state:
-    st.session_state.df_trend_historico = None
 
 # Inicializar session state para perfil de usuario
 if 'paises_ideales' not in st.session_state:
@@ -27,26 +25,45 @@ if 'perfil_generado' not in st.session_state:
 if 'perfil_datos' not in st.session_state:
     st.session_state.perfil_datos = None
 
-# --- Capa de Datos (Datos Reales) ---
-@st.cache_data
-def load_data():
-    """Carga datos históricos reales del CSV world_tourism_economy_data.csv"""
-=======
-import requests
-import time
-import geonamescache
 # --- Funciones de Carga de Datos ---
 
 @st.cache_data
 def load_precomputed_osm_data():
     """Carga los datos de OSM precalculados desde el archivo CSV."""
->>>>>>> Stashed changes
     script_dir = os.path.dirname(os.path.abspath(__file__))
     csv_path = os.path.join(script_dir, "osm_cities_with_hotels.csv")
     try:
         df = pd.read_csv(csv_path)
         # Asegurarse de que los nombres de columna no tengan espacios extra
         df.columns = df.columns.str.strip()
+
+        # --- TAREA 1: FILTRAR AGREGACIONES GLOBALES ---
+        # Lista de agregaciones a excluir para que solo queden países.
+        aggregations_to_exclude = [
+            'Africa Eastern and Southern', 'Africa Western and Central', 'Arab World',
+            'Caribbean small states', 'Central Europe and the Baltics', 'Early-demographic dividend',
+            'East Asia & Pacific', 'East Asia & Pacific (excluding high income)',
+            'East Asia & Pacific (IDA & IBRD countries)', 'Euro area', 'Europe & Central Asia',
+            'Europe & Central Asia (excluding high income)', 'Europe & Central Asia (IDA & IBRD countries)',
+            'European Union', 'Fragile and conflict affected situations', 'Heavily indebted poor countries (HIPC)',
+            'High income', 'IBRD only', 'IDA & IBRD total', 'IDA blend', 'IDA only', 'IDA total',
+            'Late-demographic dividend', 'Latin America & Caribbean',
+            'Latin America & Caribbean (excluding high income)', 'Latin America & the Caribbean (IDA & IBRD countries)',
+            'Least developed countries: UN classification', 'Low & middle income', 'Low income',
+            'Lower middle income', 'Middle East & North Africa',
+            'Middle East & North Africa (excluding high income)', 'Middle East & North Africa (IDA & IBRD countries)',
+            'Middle income', 'North America', 'Not classified', 'OECD members', 'Other small states',
+            'Pacific island small states', 'Post-demographic dividend', 'Pre-demographic dividend',
+            'South Asia', 'South Asia (IDA & IBRD)', 'Sub-Saharan Africa',
+            'Sub-Saharan Africa (excluding high income)', 'Sub-Saharan Africa (IDA & IBRD countries)',
+            'Upper middle income', 'World'
+        ]
+        
+        # Aplicar el filtro para excluir las agregaciones
+        original_rows = len(df)
+        df = df[~df['country'].isin(aggregations_to_exclude)]
+        st.sidebar.caption(f"Limpiando datos: {original_rows - len(df)} agregaciones eliminadas.")
+        
         return df
     except FileNotFoundError:
         st.error(f"Error: No se encontró el archivo 'osm_cities_with_hotels.csv'.")
@@ -77,6 +94,36 @@ def load_country_data():
         df['inflation'].fillna(df['inflation'].median(), inplace=True)
         df['unemployment'].fillna(df['unemployment'].median(), inplace=True)
 
+        # --- LUGAR CORRECTO PARA FILTRAR AGREGACIONES GLOBALES ---
+        aggregations_to_exclude = [
+            'Africa Eastern and Southern', 'Africa Western and Central', 'Arab World',
+            'Caribbean small states', 'Central Europe and the Baltics', 'Early-demographic dividend',
+            'East Asia & Pacific', 'East Asia & Pacific (excluding high income)',
+            'East Asia & Pacific (IDA & IBRD countries)', 'Euro area', 'Europe & Central Asia',
+            'Europe & Central Asia (excluding high income)', 'Europe & Central Asia (IDA & IBRD countries)',
+            'European Union', 'Fragile and conflict affected situations', 'Heavily indebted poor countries (HIPC)',
+            'High income', 'IBRD only', 'IDA & IBRD total', 'IDA blend', 'IDA only', 'IDA total',
+            'Late-demographic dividend', 'Latin America & Caribbean',
+            'Latin America & Caribbean (excluding high income)', 'Latin America & the Caribbean (IDA & IBRD countries)',
+            'Least developed countries: UN classification', 'Low & middle income', 'Low income',
+            'Lower middle income', 'Middle East & North Africa',
+            'Middle East & North Africa (excluding high income)', 'Middle East & North Africa (IDA & IBRD countries)',
+            'Middle income', 'North America', 'Not classified', 'OECD members', 'Other small states',
+            'Pacific island small states', 'Post-demographic dividend', 'Pre-demographic dividend',
+            'South Asia', 'South Asia (IDA & IBRD)', 'Sub-Saharan Africa',
+            'Sub-Saharan Africa (excluding high income)', 'Sub-Saharan Africa (IDA & IBRD countries)',
+            'Upper middle income', 'World'
+        ]
+        
+        # Aplicar el filtro para excluir las agregaciones
+        original_rows = len(df)
+        df = df[~df['country'].isin(aggregations_to_exclude)]
+        
+        # Usamos st.session_state para mostrar el mensaje solo una vez
+        if 'agregaciones_eliminadas' not in st.session_state:
+            st.session_state.agregaciones_eliminadas = original_rows - len(df)
+            st.sidebar.caption(f"Limpiando datos: {st.session_state.agregaciones_eliminadas} agregaciones eliminadas.")
+
         # Feature Engineering: Crear métricas clave
         df_processed = df.sort_values(by=['country', 'year']).copy()
         df_processed['prev_year_arrivals'] = df_processed.groupby('country')['tourism_arrivals'].shift(1)
@@ -89,11 +136,14 @@ def load_country_data():
             df_processed['tourism_receipts'] / df_processed['tourism_arrivals']
         ).replace([np.inf, -np.inf], 0).fillna(0)
 
-        # Seleccionar los datos más recientes por país
-        df_final = df_processed.loc[df_processed.groupby('country')['year'].idxmax()]
+        # --- LÓGICA CORREGIDA ---
+        # Seleccionar el último año POR PAÍS que tenga datos de turismo válidos.
+        # Esto evita que se seleccionen años recientes sin datos, lo que vaciaba el dataframe.
+        df_final = df_processed[
+            (df_processed['tourism_arrivals'].notna()) | (df_processed['tourism_receipts'].notna())
+        ].sort_values('year').groupby('country').tail(1).copy()
         
         # Eliminar países sin datos cruciales
-        df_final.dropna(subset=['tourism_arrivals', 'costo_por_turista'], inplace=True)
         
         return df_final
 
@@ -104,14 +154,6 @@ def load_country_data():
         st.error(f"Error al procesar los datos de países: {e}")
         return pd.DataFrame()
 
-<<<<<<< Updated upstream
-
-df_destinos = load_data()
-
-# Manejar el caso donde no hay datos válidos
-if df_destinos.empty:
-    st.error("❌ No hay datos válidos disponibles. Verifica que el archivo CSV esté correcto.")
-=======
 @st.cache_data
 def get_processed_data():
     """
@@ -121,6 +163,33 @@ def get_processed_data():
         df_destinos = load_country_data()
     return df_destinos
 
+@st.cache_data
+def enriquecer_con_datos_osm(df_paises, df_ciudades):
+    """
+    Enriquece el DataFrame de países con métricas agregadas desde el DataFrame de ciudades.
+    """
+    if df_ciudades is None or df_ciudades.empty:
+        st.warning("No se pudieron cargar los datos de ciudades de OSM. La recomendación se basará solo en datos económicos.")
+        df_paises['total_hoteles_pais'] = 0
+        df_paises['diversidad_ciudades_pais'] = 0
+        return df_paises
+
+    # 1. Calcular el total de hoteles por país
+    total_hoteles = df_ciudades.groupby('country')['hotel_count'].sum().reset_index()
+    total_hoteles.rename(columns={'hotel_count': 'total_hoteles_pais'}, inplace=True)
+
+    # 2. Calcular la diversidad de ciudades (número de ciudades con hoteles)
+    diversidad_ciudades = df_ciudades.groupby('country')['city'].nunique().reset_index()
+    diversidad_ciudades.rename(columns={'city': 'diversidad_ciudades_pais'}, inplace=True)
+
+    # Unir las nuevas métricas al DataFrame de países
+    df_enriquecido = pd.merge(df_paises, total_hoteles, on='country', how='left')
+    df_enriquecido = pd.merge(df_enriquecido, diversidad_ciudades, on='country', how='left')
+
+    # Llenar con 0 los países que no tengan datos de hoteles
+    df_enriquecido[['total_hoteles_pais', 'diversidad_ciudades_pais']] = df_enriquecido[['total_hoteles_pais', 'diversidad_ciudades_pais']].fillna(0)
+    return df_enriquecido
+
 # Carga los dos dataframes por separado
 df_clasificado = get_processed_data()
 df_osm_ciudades = load_precomputed_osm_data()
@@ -128,17 +197,19 @@ df_osm_ciudades = load_precomputed_osm_data()
 # Manejar el caso donde no hay datos válidos
 if df_clasificado.empty or df_osm_ciudades is None:
     st.error("❌ No se pudieron cargar los datos necesarios. Verifica los archivos CSV.")
->>>>>>> Stashed changes
     st.stop()
+
+# Enriquecer el dataframe principal con los datos de OSM
+df_clasificado = enriquecer_con_datos_osm(df_clasificado, df_osm_ciudades)
 
 # --- Barra Lateral (Inputs del Usuario) ---
 st.sidebar.header("✈️ Tu Perfil de Viajero")
 st.sidebar.write("Define tus preferencias.")
 
 # Calcular rangos dinámicos basados en datos reales
-min_budget = float(df_destinos['costo_por_turista'].quantile(0.05))
-max_budget = float(df_destinos['costo_por_turista'].quantile(0.95))
-median_budget = float(df_destinos['costo_por_turista'].median())
+min_budget = float(df_clasificado['costo_por_turista'].quantile(0.05))
+max_budget = float(df_clasificado['costo_por_turista'].quantile(0.95))
+median_budget = float(df_clasificado['costo_por_turista'].median())
 
 # 1. Input de Presupuesto por persona
 presupuesto = st.sidebar.slider(
@@ -166,12 +237,21 @@ salud_economica = st.sidebar.selectbox(
 )
 
 # 4. Filtro por región (opcional)
-regiones_disponibles = ['Todas'] + sorted(df_destinos['country'].unique().tolist())[:50]  # Top 50
+regiones_disponibles = ['Todas'] + sorted(df_clasificado['country'].unique().tolist())
 region = st.sidebar.selectbox(
     'Filtrar por región/país (opcional):',
     options=regiones_disponibles
 )
 
+# --- TAREA 1: AÑADIR EL TERMÓMETRO DE AMBIENTE TURÍSTICO ---
+st.sidebar.divider()
+st.sidebar.markdown("### 🌡️ Termómetro de Ambiente")
+ambiente_turistico = st.sidebar.select_slider(
+    '¿Qué tipo de ambiente prefieres en una ciudad?',
+    options=['Refugio Tranquilo', 'Equilibrado', 'Centro Vibrante'],
+    value='Equilibrado',
+    help="Define si prefieres ciudades con más o menos infraestructura hotelera (un indicador de concurrencia)."
+)
 # ============================================
 # SECCIÓN: PERFIL DE USUARIO PERSONALIZADO
 # ============================================
@@ -184,7 +264,7 @@ st.sidebar.subheader("✅ Destinos Ideales")
 st.sidebar.caption("Países que visitaste y te *encantaron*")
 paises_ideales_input = st.sidebar.multiselect(
     "Selecciona destinos que visitaste y amaste:",
-    sorted(df_destinos['country'].unique().tolist()),
+    sorted(df_clasificado['country'].unique().tolist()),
     default=st.session_state.paises_ideales,
     key='paises_ideales_selector',
     help="Estos países sirven como referencia para encontrar similares"
@@ -196,7 +276,7 @@ st.sidebar.subheader("❌ Destinos No-Ideales")
 st.sidebar.caption("Países que visitaste pero no recomendarías")
 paises_no_ideales_input = st.sidebar.multiselect(
     "Selecciona destinos que NO te gustaron:",
-    sorted(df_destinos['country'].unique().tolist()),
+    sorted(df_clasificado['country'].unique().tolist()),
     default=st.session_state.paises_no_ideales,
     key='paises_no_ideales_selector',
     help="Ayuda al sistema a evitar destinos similares a estos"
@@ -209,7 +289,7 @@ if st.sidebar.button('🎯 Generar Perfil Personalizado', use_container_width=Tr
         from perfil_usuario import extraer_perfil_usuario
         
         st.session_state.perfil_datos = extraer_perfil_usuario(
-            df_destinos,
+            df_clasificado,
             st.session_state.paises_ideales,
             st.session_state.paises_no_ideales
         )
@@ -326,7 +406,7 @@ with col2:
 with col3:
     st.metric("Salud Económica", salud_economica.split('(')[0].strip())
 with col4:
-    st.metric("Destinos Disponibles", len(df_destinos))
+    st.metric("Destinos Disponibles", len(df_clasificado))
 
 st.divider()
 
@@ -343,7 +423,7 @@ if generar_btn or ('mostrar_recomendaciones' in st.session_state and st.session_
     with st.spinner('Analizando datos y aplicando tu perfil... 📊'):
         # Llamar a la función lógica unificada, pasando todos los parámetros necesarios
         recomendaciones = generar_recomendaciones(
-            df=df_destinos,
+            df=df_clasificado,
             presupuesto=presupuesto,
             interes_turistico=interes_turistico,
             salud_economica=salud_economica,
@@ -358,8 +438,8 @@ if generar_btn or ('mostrar_recomendaciones' in st.session_state and st.session_
         else:
             st.success("✅ ¡Hemos encontrado estos destinos para ti!")
             
-            # Tabs para diferentes vistas
-            tab1, tab2, tab3 = st.tabs(["📍 Recomendaciones", "📊 Comparativa", "👤 Mi Perfil"])
+            # Pestañas para diferentes vistas de los resultados
+            tab1, tab2, tab3 = st.tabs(["📍 Recomendaciones y Ciudades", "📊 Comparativa Detallada", " Mi Perfil"])
             
             with tab1:
                 # Mostrar resultados
@@ -402,6 +482,54 @@ if generar_btn or ('mostrar_recomendaciones' in st.session_state and st.session_
                                 f"{row['score_final']:.2f}",
                                 help="Combinación de popularidad y economía"
                             )
+                        
+                        # --- TAREA 3: INTEGRAR CIUDADES EN LA MISMA PESTAÑA ---
+                        # --- TAREA 2: UNIFICAR LÓGICA CON LA RECOMENDACIÓN ---
+                        with st.expander(f"🏨 Ver Ciudades con ambiente '{ambiente_turistico}' en este País"):
+                            if df_osm_ciudades is not None:
+                                ciudades_del_pais = df_osm_ciudades[df_osm_ciudades['country'] == row['country']].copy()
+                                
+                                if not ciudades_del_pais.empty:
+                                    # Calcular cuantiles para definir los umbrales de densidad
+                                    q1 = ciudades_del_pais['hotel_count'].quantile(0.33)
+                                    q2 = ciudades_del_pais['hotel_count'].quantile(0.66)
+
+                                    ciudades_filtradas = pd.DataFrame()
+                                    titulo_seccion = ""
+
+                                    if ambiente_turistico == 'Refugio Tranquilo':
+                                        # Ciudades con menos hoteles que el primer tercio (o 1 si el cuantil es bajo)
+                                        umbral = max(q1, 1)
+                                        ciudades_filtradas = ciudades_del_pais[ciudades_del_pais['hotel_count'] <= umbral]
+                                        titulo_seccion = f"Ciudades con ambiente de 'Refugio Tranquilo' en **{row['country']}**:"
+                                        ciudades_filtradas = ciudades_filtradas.sort_values(by='hotel_count', ascending=True)
+
+                                    elif ambiente_turistico == 'Equilibrado':
+                                        # Ciudades en el rango intermedio
+                                        ciudades_filtradas = ciudades_del_pais[
+                                            (ciudades_del_pais['hotel_count'] > q1) & 
+                                            (ciudades_del_pais['hotel_count'] <= q2)
+                                        ]
+                                        titulo_seccion = f"Ciudades con ambiente 'Equilibrado' en **{row['country']}**:"
+                                        ciudades_filtradas = ciudades_filtradas.sort_values(by='hotel_count', ascending=False)
+
+                                    elif ambiente_turistico == 'Centro Vibrante':
+                                        # Ciudades en el tercio superior
+                                        ciudades_filtradas = ciudades_del_pais[ciudades_del_pais['hotel_count'] > q2]
+                                        titulo_seccion = f"Ciudades con ambiente de 'Centro Vibrante' en **{row['country']}**:"
+                                        ciudades_filtradas = ciudades_filtradas.sort_values(by='hotel_count', ascending=False)
+
+                                    st.write(titulo_seccion)
+                                    st.dataframe(
+                                        ciudades_filtradas[['city', 'hotel_count']].rename(columns={'city': 'Ciudad', 'hotel_count': 'Número de Hoteles'}),
+                                        use_container_width=True,
+                                        hide_index=True
+                                    )
+                                    if ciudades_filtradas.empty:
+                                        st.caption(f"No se encontraron ciudades que coincidan con el criterio '{ambiente_turistico}' para este país.")
+                                else:
+                                    st.info(f"No se encontraron datos de ciudades para '{row['country']}' en el archivo precalculado.")
+
                         
                         # Barra de similitud personalizada (si el perfil está activo)
                         if st.session_state.perfil_generado and row['similitud_score'] > 0:
@@ -607,150 +735,6 @@ if generar_btn or ('mostrar_recomendaciones' in st.session_state and st.session_
                 else:
                     st.info("👈 Primero, selecciona destinos ideales en la barra lateral y haz clic en '🎯 Generar Perfil Personalizado'")
             
-            with tab5:
-                st.subheader("🏛️ Ciudades Populares en tus Destinos Recomendados")
-                st.write("Explora las ciudades con más hoteles (según OpenStreetMap) dentro de los países que te recomendamos.")
-
-                # Extraer la lista única de países recomendados
-                paises_recomendados = recomendaciones['country'].unique()
-
-                if len(paises_recomendados) > 0:
-                    # Selector para que el usuario elija un país de la lista de recomendados
-                    pais_seleccionado_ciudades = st.selectbox(
-                        "Selecciona un país para explorar sus ciudades:",
-                        options=paises_recomendados,
-                        key="selector_ciudades_pais"
-                    )
-
-                    if pais_seleccionado_ciudades and df_osm_ciudades is not None:
-                        # CORRECTO: Filtrar el dataframe de OSM (df_osm_ciudades)
-                        ciudades_del_pais = df_osm_ciudades[df_osm_ciudades['Pais'] == pais_seleccionado_ciudades].copy()
-
-                        if not ciudades_del_pais.empty:
-                            # Opciones de ordenamiento
-                            orden_ciudades = st.radio(
-                                "Ordenar ciudades por:",
-                                ["Mayor número de hoteles", "Menor número de hoteles"],
-                                key="orden_hoteles",
-                                horizontal=True
-                            )
-
-                            # Ordenar el dataframe de ciudades
-                            ascending_order = (orden_ciudades == "Menor número de hoteles")
-                            ciudades_ordenadas = ciudades_del_pais.sort_values(by='Hoteles', ascending=ascending_order)
-
-                            st.write(f"Mostrando ciudades en **{pais_seleccionado_ciudades}**:")
-
-                            # Mostrar las ciudades en un formato de tabla mejorado
-                            st.dataframe(
-                                ciudades_ordenadas[['Ciudad', 'Hoteles']].rename(columns={'Hoteles': 'Número de Hoteles'}),
-                                use_container_width=True,
-                                hide_index=True
-                            )
-                        else:
-                            st.info(f"No se encontraron datos de ciudades para '{pais_seleccionado_ciudades}' en el archivo precalculado.")
-                else:
-                    st.warning("Primero genera una recomendación para poder explorar las ciudades.")
-            
-            # TAB 4 DESHABILITADA POR AHORA - PRÓXIMA ITERACIÓN
-            # with tab4:
-            #     st.subheader("📈 Tendencias de Densidad Turística")
-            #     st.write("Analiza la tendencia de llegadas y salidas de turistas en los últimos 10 años")
-
-            #     if st.session_state.df_trend_historico is not None:
-            #         df_pais_trend = st.session_state.df_trend_historico[
-            #             st.session_state.df_trend_historico['country'] == pais_seleccionado
-            #         ].sort_values('year').copy()
-            #         
-            #         if not df_pais_trend.empty:
-            #             # Gráfico de líneas: Llegadas y Salidas
-            #             st.subheader(f"Flujo Turístico - {pais_seleccionado}")
-            #             
-            #             # Preparar datos para el gráfico
-            #             df_grafico = df_pais_trend[['year', 'tourism_arrivals', 'tourism_departures']].copy()
-            #             df_grafico.columns = ['Año', 'Llegadas', 'Salidas']
-            #             df_grafico.set_index('Año', inplace=True)
-            #             
-            #             st.line_chart(df_grafico)
-            #             
-            #             # Métricas de tendencia
-            #             st.divider()
-            #             st.subheader("📊 Métricas de Tendencia")
-            #             
-            #             llegadas_inicio = df_pais_trend['tourism_arrivals'].iloc[0]
-            #             llegadas_final = df_pais_trend['tourism_arrivals'].iloc[-1]
-            #             porcentaje_llegadas = ((llegadas_final - llegadas_inicio) / llegadas_inicio * 100) if llegadas_inicio > 0 else 0
-            #             
-            #             salidas_inicio = df_pais_trend['tourism_departures'].iloc[0]
-            #             salidas_final = df_pais_trend['tourism_departures'].iloc[-1]
-            #             porcentaje_salidas = ((salidas_final - salidas_inicio) / salidas_inicio * 100) if salidas_inicio > 0 else 0
-            #             
-            #             # Mostrar métricas en columnas
-            #             met_col1, met_col2, met_col3 = st.columns(3)
-            #             
-            #             with met_col1:
-            #                 st.metric(
-            #                     "Cambio en Llegadas",
-            #                     f"{porcentaje_llegadas:+.1f}%",
-            #                     delta=f"{(llegadas_final - llegadas_inicio)/1e6:+.2f}M",
-            #                     help=f"De {llegadas_inicio/1e6:.2f}M a {llegadas_final/1e6:.2f}M"
-            #                 )
-            #             
-            #             with met_col2:
-            #                 st.metric(
-            #                     "Cambio en Salidas",
-            #                     f"{porcentaje_salidas:+.1f}%",
-            #                     delta=f"{(salidas_final - salidas_inicio)/1e6:+.2f}M",
-            #                     help=f"De {salidas_inicio/1e6:.2f}M a {salidas_final/1e6:.2f}M"
-            #                 )
-            #             
-            #             with met_col3:
-            #                 # Densidad turística (interpretación)
-            #                 densidad_valor = llegadas_final / 1e6
-            #                 if densidad_valor > 100:
-            #                     densidad_icon = "🔴"
-            #                     densidad_nivel = "Muy Alta"
-            #                 elif densidad_valor > 50:
-            #                     densidad_icon = "🟠"
-            #                     densidad_nivel = "Alta"
-            #                 elif densidad_valor > 10:
-            #                     densidad_icon = "🟡"
-            #                     densidad_nivel = "Media"
-            #                 else:
-            #                     densidad_icon = "🟢"
-            #                     densidad_nivel = "Baja"
-            #                 
-            #                 st.metric(
-            #                     f"{densidad_icon} Densidad Turística",
-            #                     densidad_nivel,
-            #                     help=f"{densidad_valor:.2f}M de llegadas"
-            #                 )
-            #             
-            #             # Tabla histórica detallada
-            #             st.divider()
-            #             st.subheader("📋 Datos Históricos Detallados")
-            #             
-            #             df_tabla = df_pais_trend[[
-            #                 'year', 'tourism_arrivals', 'tourism_departures', 'tourism_receipts', 'gdp'
-            #             ]].copy()
-            #             
-            #             df_tabla.columns = ['Año', 'Llegadas', 'Salidas', 'Recibos ($)', 'GDP ($)']
-            #             
-            #             st.dataframe(
-            #                 df_tabla.style.format({
-            #                     'Llegadas': '{:,.0f}',
-            #                     'Salidas': '{:,.0f}',
-            #                     'Recibos ($)': '{:,.0f}',
-            #                     'GDP ($)': '{:,.0f}'
-            #                 }),
-            #                 use_container_width=True,
-            #                 hide_index=True
-            #             )
-            #         else:
-            #             st.warning(f"⚠️ No hay datos históricos disponibles para {pais_seleccionado}")
-            #     else:
-            #         st.error("❌ Los datos históricos no se cargaron correctamente")
-
 if limpiar_btn:
     st.session_state.mostrar_recomendaciones = False
     st.rerun()
